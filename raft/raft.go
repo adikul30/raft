@@ -7,13 +7,14 @@ import (
 )
 
 const (
-	MinWaitInSecs = 3
-	MaxWaitInSecs = 5
+	MinWaitInSecs   = 5
+	MaxWaitInSecs   = 10
+	HeartbeatInSecs = 2
 )
 
 type Command struct {
 	variable string
-	value uint
+	value    uint
 }
 
 type Entry struct {
@@ -30,26 +31,27 @@ const (
 )
 
 type Peer struct {
-
+	id int
 }
 
 type Raft struct {
 	// should be ideally stored on disk
 	currentTerm int
-	votedFor *int
-	log []Entry
+	votedFor    *int
+	log         []Entry
 
 	// volatile state
-	commitIndex int
-	lastApplied int
+	commitIndex           int
+	lastApplied           int
 	lastUpdatedFromLeader time.Time
 	currentState          State
-	id int
-	peers []Peer
+	id                    int
+	peers                 []Peer
 
 	// leader
-	nextIndex []int
-	matchIndex []int
+	nextIndex         []int
+	matchIndex        []int
+	lastHeartbeatSent time.Time
 
 	// mutex
 	mu sync.Mutex
@@ -57,7 +59,7 @@ type Raft struct {
 
 type Consensus interface {
 	RequestVote(term, candidateId, lastLogIndex, lastLogTerm int)
-	AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries[]Entry, leaderCommit int)
+	AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries []Entry, leaderCommit int)
 }
 
 // election timeout goroutine
@@ -79,15 +81,14 @@ func (r *Raft) electionTimeout() {
 			} else {
 				r.mu.Unlock()
 			}
-		} else {
-			r.mu.Unlock()
 		}
+		r.mu.Unlock()
 	}
 }
 
 func getRandomElectionTimeoutInSecs() int {
 	rand.Seed(time.Now().UnixNano())
-	timeout := rand.Intn(MaxWaitInSecs - MinWaitInSecs + 1) + MinWaitInSecs
+	timeout := rand.Intn(MaxWaitInSecs-MinWaitInSecs+1) + MinWaitInSecs
 	return timeout
 }
 
@@ -109,6 +110,7 @@ func (r *Raft) conductElection() {
 
 	for _, peer := range r.peers {
 		go func(p Peer) {
+			// todo: might have to make lastLogIndex => lastLogIndex + 1
 			termToUpdate, voteGranted := r.RequestVote(currentTermCopy, r.id, lastLogIndex, lastEntry.term)
 			// re-check assumptions
 			mu.Lock()
@@ -151,21 +153,51 @@ func (r *Raft) conductElection() {
 	}
 }
 
-// todo: for leader: send heartbeats goroutine
+// for leader: send heartbeats goroutine
 func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader {
-			for _, peer := range r.peers {
-				go func(p Peer) {
-					termToUpdate, success := r.AppendEntries(r.currentTerm, r.id, , r.log, r.commitIndex)
+			currentTime := time.Now()
+			duration := currentTime.Sub(r.lastHeartbeatSent)
+			if duration.Seconds() > float64(HeartbeatInSecs) {
+				r.lastHeartbeatSent = time.Now()
+				currentTermCopy := r.currentTerm
+				commitIndexCopy := r.commitIndex
+				for _, peer := range r.peers {
+					go func(p Peer) {
+						r.mu.Lock()
+						totalLogs := len(r.log)
+						nextIndex := r.nextIndex[p.id]
+						prevLogIndex := nextIndex - 1
+						prevLogIndexTerm := r.log[prevLogIndex].term
+						entries := make([]Entry, totalLogs-nextIndex)
+						newOnes := r.log[nextIndex:]
+						copy(entries, newOnes)
+						r.mu.Unlock()
+						termToUpdate, success := r.AppendEntries(currentTermCopy, r.id, prevLogIndex, prevLogIndexTerm, entries, commitIndexCopy)
+						r.mu.Lock()
+						defer r.mu.Unlock()
+						if !success {
+							if termToUpdate > r.currentTerm {
+								r.currentTerm = termToUpdate
+								r.becomeFollower()
+							} else {
+								// todo 2B: handle log inconsistency logic (section 5.3)
+							}
 
-				}(peer)
+						} else {
+							r.nextIndex[p.id] = totalLogs
+							r.matchIndex[p.id] = totalLogs - 1
+						}
+					}(peer)
+				}
+			} else {
+				r.mu.Unlock()
+				time.Sleep(1 * time.Second)
 			}
-		} else {
-			r.mu.Unlock()
-			break
 		}
+		r.mu.Unlock()
 	}
 }
 
@@ -188,7 +220,7 @@ func (r *Raft) becomeCandidate() {
 }
 
 func getMajority(N int) int {
-	return (N/2) + 1
+	return (N / 2) + 1
 }
 
 func (r *Raft) RequestVote(term, candidateId, lastLogIndex, lastLogTerm int) (termToUpdate int, voteGranted bool) {
@@ -221,6 +253,7 @@ func Make(id int) *Raft {
 	rf.id = id
 	rf.lastUpdatedFromLeader = time.Now()
 	go rf.electionTimeout()
+	go rf.sendHeartbeatsAsLeader()
 
 	return rf
 }
