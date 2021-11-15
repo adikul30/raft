@@ -34,9 +34,9 @@ const (
 )
 
 type Peer struct {
-	id int
-	port string
-	client *rpc.Client
+	Id     int
+	Port   string
+	Client *rpc.Client
 }
 
 type Raft struct {
@@ -61,11 +61,6 @@ type Raft struct {
 	// mutex
 	mu sync.Mutex
 }
-
-//type Consensus interface {
-//	RequestVote(term, candidateId, lastLogIndex, lastLogTerm int)
-//	AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries []Entry, leaderCommit int)
-//}
 
 // election timeout goroutine
 func (r *Raft) electionTimeout() {
@@ -114,9 +109,11 @@ func (r *Raft) conductElection() {
 	cond := sync.NewCond(&mu)
 
 	for _, peer := range r.peers {
+		if peer.Id == r.id {
+			continue
+		}
 		go func(p Peer) {
 			// todo: might have to make lastLogIndex => lastLogIndex + 1
-			//termToUpdate, voteGranted := r.RequestVote(currentTermCopy, r.id, lastLogIndex, lastEntry.term)
 			defer func() {
 				totalReceived += 1
 				cond.Broadcast()
@@ -129,11 +126,9 @@ func (r *Raft) conductElection() {
 			}
 
 			reply := &RequestVoteReply{}
-			err := r.RequestVote(args, reply)
+			err := r.requestVoteRPC(p.Id, args, reply)
 			if err != nil {
 				log.Printf("RequestVote: args: %+v error: %s\n", args, err.Error())
-				//totalReceived += 1
-				//cond.Broadcast()
 				return
 			}
 			// re-check assumptions
@@ -143,8 +138,6 @@ func (r *Raft) conductElection() {
 			if r.currentTerm > currentTermCopy {
 				// convert to follower (paper section 5.1)
 				r.becomeFollower()
-				//totalReceived += 1
-				//cond.Broadcast()
 				return
 			}
 
@@ -153,9 +146,6 @@ func (r *Raft) conductElection() {
 			} else {
 				r.currentTerm = reply.TermToUpdate
 			}
-
-			//totalReceived += 1
-			//cond.Broadcast()
 		}(peer)
 	}
 
@@ -190,10 +180,13 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 				currentTermCopy := r.currentTerm
 				commitIndexCopy := r.commitIndex
 				for _, peer := range r.peers {
+					if peer.Id == r.id {
+						continue
+					}
 					go func(p Peer) {
 						r.mu.Lock()
 						totalLogs := len(r.log)
-						nextIndex := r.nextIndex[p.id]
+						nextIndex := r.nextIndex[p.Id]
 						prevLogIndex := nextIndex - 1
 						prevLogIndexTerm := r.log[prevLogIndex].Term
 						entries := make([]Entry, totalLogs-nextIndex)
@@ -211,13 +204,12 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						}
 
 						reply := &AppendEntriesReply{}
-
-						//termToUpdate, success := r.AppendEntries(args, &reply)
-						err := r.AppendEntries(args, reply)
+						err := r.appendEntriesRPC(p.Id, args, reply)
 						if err != nil {
 							log.Printf("RequestVote: args: %+v error: %s\n", args, err.Error())
 							return
 						}
+
 						r.mu.Lock()
 						defer r.mu.Unlock()
 						if !reply.Success {
@@ -229,8 +221,8 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 							}
 
 						} else {
-							r.nextIndex[p.id] = totalLogs
-							r.matchIndex[p.id] = totalLogs - 1
+							r.nextIndex[p.Id] = totalLogs
+							r.matchIndex[p.Id] = totalLogs - 1
 						}
 					}(peer)
 				}
@@ -271,7 +263,7 @@ type RequestVoteArgs struct {
 
 type RequestVoteReply struct {
 	TermToUpdate int
-	VoteGranted bool
+	VoteGranted  bool
 }
 
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
@@ -300,19 +292,39 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 	return errors.New("unexpected state! ")
 }
 
+func (r *Raft) requestVoteRPC(peerId int, args RequestVoteArgs, reply *RequestVoteReply) error {
+	err := r.peers[peerId].Client.Call("Raft.RequestVote", args, reply)
+	return err
+}
+
+func (r *Raft) appendEntriesRPC(peerId int, args AppendEntriesArgs, reply *AppendEntriesReply) error {
+	err := r.peers[peerId].Client.Call("Raft.AppendEntries", args, reply)
+	return err
+}
+
 type AppendEntriesArgs struct {
 	Term, LeaderId, PrevLogIndex, PrevLogTerm int
-	Entries []Entry
-	LeaderCommit int
+	Entries                                   []Entry
+	LeaderCommit                              int
 }
 
 type AppendEntriesReply struct {
 	TermToUpdate int
-	Success bool
+	Success      bool
 }
 
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	panic("implement me")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if args.Term < r.currentTerm {
+		reply.Success = false
+		reply.TermToUpdate = r.currentTerm
+		return nil
+	}
+
+	// todo 2B: check for other conditions
+	return errors.New("unexpected state! ")
 }
 
 func Make(id int, peers []Peer) *Raft {
