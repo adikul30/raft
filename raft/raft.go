@@ -1,7 +1,10 @@
 package raft
 
 import (
+	"errors"
+	"log"
 	"math/rand"
+	"net/rpc"
 	"sync"
 	"time"
 )
@@ -13,13 +16,13 @@ const (
 )
 
 type Command struct {
-	variable string
-	value    uint
+	Variable string
+	Value    uint
 }
 
 type Entry struct {
-	command Command
-	term    int
+	Command Command
+	Term    int
 }
 
 type State int
@@ -32,6 +35,8 @@ const (
 
 type Peer struct {
 	id int
+	port string
+	client *rpc.Client
 }
 
 type Raft struct {
@@ -57,10 +62,10 @@ type Raft struct {
 	mu sync.Mutex
 }
 
-type Consensus interface {
-	RequestVote(term, candidateId, lastLogIndex, lastLogTerm int)
-	AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries []Entry, leaderCommit int)
-}
+//type Consensus interface {
+//	RequestVote(term, candidateId, lastLogIndex, lastLogTerm int)
+//	AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries []Entry, leaderCommit int)
+//}
 
 // election timeout goroutine
 func (r *Raft) electionTimeout() {
@@ -111,7 +116,26 @@ func (r *Raft) conductElection() {
 	for _, peer := range r.peers {
 		go func(p Peer) {
 			// todo: might have to make lastLogIndex => lastLogIndex + 1
-			termToUpdate, voteGranted := r.RequestVote(currentTermCopy, r.id, lastLogIndex, lastEntry.term)
+			//termToUpdate, voteGranted := r.RequestVote(currentTermCopy, r.id, lastLogIndex, lastEntry.term)
+			defer func() {
+				totalReceived += 1
+				cond.Broadcast()
+			}()
+			args := RequestVoteArgs{
+				Term:         currentTermCopy,
+				CandidateId:  r.id,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastEntry.Term,
+			}
+
+			reply := &RequestVoteReply{}
+			err := r.RequestVote(args, reply)
+			if err != nil {
+				log.Printf("RequestVote: args: %+v error: %s\n", args, err.Error())
+				//totalReceived += 1
+				//cond.Broadcast()
+				return
+			}
 			// re-check assumptions
 			mu.Lock()
 			defer mu.Unlock()
@@ -119,18 +143,19 @@ func (r *Raft) conductElection() {
 			if r.currentTerm > currentTermCopy {
 				// convert to follower (paper section 5.1)
 				r.becomeFollower()
-				totalReceived += 1
+				//totalReceived += 1
+				//cond.Broadcast()
 				return
 			}
 
-			if voteGranted {
+			if reply.VoteGranted {
 				totalVotes += 1
 			} else {
-				r.currentTerm = termToUpdate
+				r.currentTerm = reply.TermToUpdate
 			}
 
-			totalReceived += 1
-			cond.Broadcast()
+			//totalReceived += 1
+			//cond.Broadcast()
 		}(peer)
 	}
 
@@ -170,17 +195,34 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						totalLogs := len(r.log)
 						nextIndex := r.nextIndex[p.id]
 						prevLogIndex := nextIndex - 1
-						prevLogIndexTerm := r.log[prevLogIndex].term
+						prevLogIndexTerm := r.log[prevLogIndex].Term
 						entries := make([]Entry, totalLogs-nextIndex)
 						newOnes := r.log[nextIndex:]
 						copy(entries, newOnes)
 						r.mu.Unlock()
-						termToUpdate, success := r.AppendEntries(currentTermCopy, r.id, prevLogIndex, prevLogIndexTerm, entries, commitIndexCopy)
+
+						args := AppendEntriesArgs{
+							Term:         currentTermCopy,
+							LeaderId:     r.id,
+							PrevLogIndex: prevLogIndex,
+							PrevLogTerm:  prevLogIndexTerm,
+							Entries:      entries,
+							LeaderCommit: commitIndexCopy,
+						}
+
+						reply := &AppendEntriesReply{}
+
+						//termToUpdate, success := r.AppendEntries(args, &reply)
+						err := r.AppendEntries(args, reply)
+						if err != nil {
+							log.Printf("RequestVote: args: %+v error: %s\n", args, err.Error())
+							return
+						}
 						r.mu.Lock()
 						defer r.mu.Unlock()
-						if !success {
-							if termToUpdate > r.currentTerm {
-								r.currentTerm = termToUpdate
+						if !reply.Success {
+							if reply.TermToUpdate > r.currentTerm {
+								r.currentTerm = reply.TermToUpdate
 								r.becomeFollower()
 							} else {
 								// todo 2B: handle log inconsistency logic (section 5.3)
@@ -223,34 +265,60 @@ func getMajority(N int) int {
 	return (N / 2) + 1
 }
 
-func (r *Raft) RequestVote(term, candidateId, lastLogIndex, lastLogTerm int) (termToUpdate int, voteGranted bool) {
-	if term < r.currentTerm {
-		return r.currentTerm, false
+type RequestVoteArgs struct {
+	Term, CandidateId, LastLogIndex, LastLogTerm int
+}
+
+type RequestVoteReply struct {
+	TermToUpdate int
+	VoteGranted bool
+}
+
+func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
+	r.mu.Lock()
+	if args.Term < r.currentTerm {
+		reply.VoteGranted = false
+		reply.TermToUpdate = r.currentTerm
+		r.mu.Unlock()
+		return nil
 	}
 
-	if term > r.currentTerm {
-		r.mu.Lock()
-		r.currentTerm = term
+	if args.Term > r.currentTerm {
+		r.currentTerm = args.Term
 		r.currentState = Follower
-		r.mu.Unlock()
 	}
 
 	// todo 2B: also check if candidate's log is up-to-date
-	if r.votedFor == nil || *r.votedFor == candidateId {
-		return r.currentTerm, true
+	if r.votedFor == nil || *r.votedFor == args.CandidateId {
+		reply.VoteGranted = true
+		reply.TermToUpdate = r.currentTerm
+		r.mu.Unlock()
+		return nil
 	}
 
-	// ideally unreachable
-	return r.currentTerm, false
+	r.mu.Unlock()
+	return errors.New("unexpected state! ")
 }
 
-func (r *Raft) AppendEntries(term, leaderId, prevLogIndex, prevLogTerm int, entries []Entry, leaderCommit int) (termToUpdate int, success bool) {
+type AppendEntriesArgs struct {
+	Term, LeaderId, PrevLogIndex, PrevLogTerm int
+	Entries []Entry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	TermToUpdate int
+	Success bool
+}
+
+func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
 	panic("implement me")
 }
 
-func Make(id int) *Raft {
+func Make(id int, peers []Peer) *Raft {
 	rf := &Raft{}
 	rf.id = id
+	rf.peers = peers
 	rf.lastUpdatedFromLeader = time.Now()
 	go rf.electionTimeout()
 	go rf.sendHeartbeatsAsLeader()
