@@ -32,20 +32,15 @@ func main() {
 	for i := 0; i < N; i++ {
 		raftNode := raft.Make(i, peers)
 		rafts = append(rafts, raftNode)
-		//fmt.Printf("rafts: %v\n", rafts)
 	}
 
 	cfg := config{rafts: rafts}
-	//fmt.Printf("rafts: %v\n", rafts)
 	fmt.Printf("cfg.rafts: %v\n", cfg.rafts)
 
 	for i, peer := range peers {
 		fmt.Println(i)
 		wg.Add(1)
 		go func(id int, p raft.Peer) {
-			//raftNode := raft.Make(i, peers)
-			//cfg.rafts = append(cfg.rafts, raftNode)
-			//fmt.Println("dfsdfsdf: ", id, p.Port)
 			handler := rpc.NewServer()
 			handler.Register(cfg.rafts[id])
 			l, e := net.Listen("tcp", "127.0.0.1:" + p.Port)
@@ -59,6 +54,19 @@ func main() {
 	}
 
 	fmt.Println("waiting...")
+
+	//for {
+	//	totalLeaders := 0
+	//	for _, raft := range cfg.rafts {
+	//		if raft.IsLeader() {
+	//			totalLeaders += 1
+	//		}
+	//	}
+	//	if totalLeaders > 1 {
+	//		log.Fatalf("Two leaders!!")
+	//	}
+	//	time.Sleep(3 * time.Second)
+	//}
 
 	wg.Wait()
 }

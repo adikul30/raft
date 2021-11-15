@@ -2,7 +2,6 @@ package raft
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -70,18 +69,22 @@ func (r *Raft) electionTimeout() {
 		if r.currentState != Leader {
 			randomElectionTimeoutInMillis := getRandomElectionTimeoutInMillis()
 			log.Printf("raft: %v, currentTerm: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, randomElectionTimeoutInMillis)
-			//log.Printf("raft: %v,  time.Now().Sub(r.lastUpdatedFromLeader).Seconds(): %v\n", r.id,  time.Now().Sub(r.lastUpdatedFromLeader).Seconds())
-			//log.Printf("raft: %v,  float64(randomElectionTimeoutInSecs): %v\n", r.id, float64(randomElectionTimeoutInSecs))
 			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
 				r.mu.Unlock()
 				time.Sleep(1 * time.Second)
 				r.mu.Lock()
 			}
 
-			//currentTime := time.Now()
-			//duration := currentTime.Sub(r.lastUpdatedFromLeader)
-			// todo: tune election timeout duration
-			//if duration.Seconds() > float64(randomElectionTimeoutInSecs) {
+			if r.currentState != Follower {
+				r.mu.Unlock()
+				continue
+			}
+
+			if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
+				r.mu.Unlock()
+				continue
+			}
+
 			r.becomeCandidate()
 			r.mu.Unlock()
 			go r.conductElection()
@@ -118,7 +121,6 @@ func (r *Raft) conductElection() {
 	majority := getMajority(len(r.peers))
 	r.mu.Unlock()
 
-	//var mu sync.Mutex
 	cond := sync.NewCond(&r.mu)
 
 	log.Printf("raft: %v, let's get some votes for term: %v\n", r.id, r.currentTerm)
@@ -141,7 +143,6 @@ func (r *Raft) conductElection() {
 			}
 
 			reply := &RequestVoteReply{}
-			//log.Printf("raft: %v, calling RequestVote...\n", r.id)
 			if r.currentState != Candidate {
 				return
 			}
@@ -151,15 +152,9 @@ func (r *Raft) conductElection() {
 				return
 			}
 			log.Printf("raft: %v, from: %v, RequestVote: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
-			// re-check assumptions
+
 			r.mu.Lock()
 			defer r.mu.Unlock()
-
-			//if r.currentTerm > currentTermCopy {
-			//	// convert to follower (paper section 5.1)
-			//	r.becomeFollower()
-			//	return
-			//}
 
 			if r.currentState != Candidate {
 				return
@@ -176,13 +171,11 @@ func (r *Raft) conductElection() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for totalVotes < majority && totalReceived != len(r.peers) - 1 {
-		//log.Printf("raft: %v, busy waiting for votes...\n", r.id)
 		cond.Wait()
 	}
 
 	if r.currentState != Candidate {
 		// case: received higher term from one of the appendEntries responses and changed to follower
-		//r.becomeFollower()
 		return
 	}
 
@@ -191,9 +184,9 @@ func (r *Raft) conductElection() {
 		r.becomeLeader()
 	} else {
 		// todo: what to do after split vote or losing election?
+		r.becomeFollower()
 		r.lastUpdatedFromLeader = time.Now()
 		log.Printf("raft: %v suffering from split vote/lost election \n", r.id)
-		r.becomeFollower()
 	}
 }
 
@@ -217,14 +210,6 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 	r.mu.Unlock()
 	return nil
 
-	//if args.Term > r.currentTerm {
-	//	r.currentTerm = args.Term
-	//	r.becomeFollower()
-	//	reply.VoteGranted = true
-	//	r.mu.Unlock()
-	//	return nil
-	//}
-
 	// todo 2B: also check if candidate's log is up-to-date
 }
 
@@ -243,7 +228,6 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
-				fmt.Println("sending Heartbeats")
 				r.lastHeartbeatSent = time.Now()
 				currentTermCopy := r.currentTerm
 				commitIndexCopy := r.commitIndex
@@ -254,7 +238,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						continue
 					}
 					go func(p Peer) {
-						log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
+						//log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
 						//r.mu.Lock()
 						//totalLogs := len(r.log)
 						//nextIndex := r.nextIndex[p.Id]
@@ -278,13 +262,13 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						}
 
 						reply := &AppendEntriesReply{}
-						log.Printf("raft: %v, calling appendEntriesRPC for %v!\n", r.id, p.Id)
+						//log.Printf("raft: %v, calling appendEntriesRPC for %v!\n", r.id, p.Id)
 						err := r.appendEntriesRPC(p.Id, args, reply)
 						if err != nil {
 							log.Printf("AppendEntries: args: %+v error: %s\n", args, err.Error())
 							return
 						}
-						log.Printf("raft: %v, from: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
+						//log.Printf("raft: %v, from: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
 						r.mu.Lock()
 						defer r.mu.Unlock()
 						if !reply.Success {
@@ -324,13 +308,14 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 	}
 
 	if args.Term >= r.currentTerm{
-		log.Printf("raft: %v, changing self to follower, following leader: %v!\n", r.id, args.LeaderId)
 		r.currentTerm = args.Term
 		r.lastUpdatedFromLeader = time.Now()
-		r.becomeFollower()
+		if r.currentState != Follower {
+			r.becomeFollower()
+		}
 		reply.Success = true
 		reply.TermToUpdate = args.Term
-		log.Printf("raft: %v, changing self to follower, returning nil to: %v!\n", r.id, args.LeaderId)
+		log.Printf("raft: %v, changing self to follower, following leader: %v!\n", r.id, args.LeaderId)
 		return nil
 	}
 
@@ -352,6 +337,12 @@ func (r *Raft) becomeCandidate() {
 	//r.mu.Lock()
 	//defer r.mu.Unlock()
 	r.currentState = Candidate
+}
+
+func (r *Raft) IsLeader() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentState == Leader
 }
 
 func getMajority(N int) int {
@@ -376,7 +367,6 @@ func (r *Raft) requestVoteRPC(peerId int, args RequestVoteArgs, reply *RequestVo
 }
 
 func (r *Raft) appendEntriesRPC(peerId int, args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	fmt.Println("inside appendEntriesRPC!")
 	if r.peers[peerId].Client == nil {
 		r.constructClientEndpoint(peerId)
 	}
