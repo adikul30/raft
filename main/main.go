@@ -7,33 +7,58 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
-	"os"
 	"strconv"
 	"sync"
 )
 
+const (
+	N = 3
+)
+
+type config struct {
+	rafts []*raft.Raft
+}
+
 func main() {
 	var wg sync.WaitGroup
-	cliArgs := os.Args[1:]
-	peers := make([]raft.Peer, 3)
-	for i, peer := range peers {
-		peer.Id = i
-		peer.Port = "900" + strconv.Itoa(i)
+	peers := make([]raft.Peer, N)
+	rafts := []*raft.Raft{}
+
+	for i, _ := range peers {
+		peers[i].Id = i
+		peers[i].Port = "900" + strconv.Itoa(i)
 	}
-	for i, arg := range cliArgs {
+
+	for i := 0; i < N; i++ {
+		raftNode := raft.Make(i, peers)
+		rafts = append(rafts, raftNode)
+		//fmt.Printf("rafts: %v\n", rafts)
+	}
+
+	cfg := config{rafts: rafts}
+	//fmt.Printf("rafts: %v\n", rafts)
+	fmt.Printf("cfg.rafts: %v\n", cfg.rafts)
+
+	for i, peer := range peers {
+		fmt.Println(i)
 		wg.Add(1)
-		go func(i int, port string) {
-			raftNode := raft.Make(i, peers)
+		go func(id int, p raft.Peer) {
+			//raftNode := raft.Make(i, peers)
+			//cfg.rafts = append(cfg.rafts, raftNode)
+			//fmt.Println("dfsdfsdf: ", id, p.Port)
 			handler := rpc.NewServer()
-			handler.Register(raftNode)
-			l, e := net.Listen("tcp", "127.0.0.1:" + string(port))
+			handler.Register(cfg.rafts[id])
+			l, e := net.Listen("tcp", "127.0.0.1:" + p.Port)
 			if e != nil {
 				log.Fatal("listen error:", e)
 			}
-			fmt.Printf("port %s listening on %s\n", port, l.Addr())
+			fmt.Printf("listening on %s\n", l.Addr())
 			http.Serve(l, handler)
 			wg.Done()
-		}(i, arg)
+		}(i, peer)
 	}
+
+	fmt.Println("waiting...")
+
 	wg.Wait()
 }

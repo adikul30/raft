@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	MinWaitInSecs   = 5
-	MaxWaitInSecs   = 10
-	HeartbeatInSecs = 2
+	MinWaitInSecs   = 3
+	MaxWaitInSecs   = 5
+	HeartbeatInSecs = 1
 )
 
 type Command struct {
@@ -67,22 +67,28 @@ func (r *Raft) electionTimeout() {
 	for {
 		r.mu.Lock()
 		if r.currentState != Leader {
-			r.mu.Unlock()
 			randomElectionTimeoutInSecs := getRandomElectionTimeoutInSecs()
-			time.Sleep(1 * time.Second)
-			r.mu.Lock()
-			currentTime := time.Now()
-			duration := currentTime.Sub(r.lastUpdatedFromLeader)
-			// todo: tune election timeout duration
-			if duration.Seconds() > float64(randomElectionTimeoutInSecs) {
-				r.becomeCandidate()
+			log.Printf("raft: %v, randomElectionTimeoutInSecs: %v\n", r.id, randomElectionTimeoutInSecs)
+			//log.Printf("raft: %v,  time.Now().Sub(r.lastUpdatedFromLeader).Seconds(): %v\n", r.id,  time.Now().Sub(r.lastUpdatedFromLeader).Seconds())
+			//log.Printf("raft: %v,  float64(randomElectionTimeoutInSecs): %v\n", r.id, float64(randomElectionTimeoutInSecs))
+			for time.Now().Sub(r.lastUpdatedFromLeader).Seconds() < float64(randomElectionTimeoutInSecs) {
 				r.mu.Unlock()
-				go r.conductElection()
-			} else {
-				r.mu.Unlock()
+				time.Sleep(1 * time.Second)
+				r.mu.Lock()
 			}
+			//currentTime := time.Now()
+			//duration := currentTime.Sub(r.lastUpdatedFromLeader)
+			// todo: tune election timeout duration
+			//if duration.Seconds() > float64(randomElectionTimeoutInSecs) {
+			log.Printf("raft: %v, candidacy started\n", r.id)
+			r.becomeCandidate()
+			log.Printf("raft: %v\n", r.currentState)
+			r.mu.Unlock()
+			go r.conductElection()
+			//}
+		} else {
+			r.mu.Unlock()
 		}
-		r.mu.Unlock()
 	}
 }
 
@@ -101,12 +107,22 @@ func (r *Raft) conductElection() {
 	r.lastUpdatedFromLeader = time.Now()
 	currentTermCopy := r.currentTerm
 	lastLogIndex := len(r.log) - 1
-	lastEntry := r.log[lastLogIndex]
+	var lastEntry Entry
+	if len(r.log) == 0 {
+		lastLogIndex = 0
+		lastEntry = Entry{Term: 0}
+	} else {
+		lastLogIndex = len(r.log) - 1
+		lastEntry = r.log[lastLogIndex]
+	}
+
 	majority := getMajority(len(r.peers))
 	r.mu.Unlock()
 
 	var mu sync.Mutex
 	cond := sync.NewCond(&mu)
+
+	log.Printf("raft: %v, let's get some votes...\n", r.id)
 
 	for _, peer := range r.peers {
 		if peer.Id == r.id {
@@ -126,11 +142,13 @@ func (r *Raft) conductElection() {
 			}
 
 			reply := &RequestVoteReply{}
+			log.Printf("raft: %v, calling RequestVote...\n", r.id)
 			err := r.requestVoteRPC(p.Id, args, reply)
 			if err != nil {
 				log.Printf("RequestVote: args: %+v error: %s\n", args, err.Error())
 				return
 			}
+			log.Printf("raft: %v, RequestVote: args: %v; reply: %v\n", r.id, args, reply)
 			// re-check assumptions
 			mu.Lock()
 			defer mu.Unlock()
@@ -151,7 +169,8 @@ func (r *Raft) conductElection() {
 
 	mu.Lock()
 	defer mu.Unlock()
-	for totalVotes < majority && totalReceived != len(r.peers) {
+	for totalVotes < majority && totalReceived != len(r.peers) - 1 {
+		log.Printf("raft: %v, busy waiting for votes...\n", r.id)
 		cond.Wait()
 	}
 
@@ -173,6 +192,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader {
+			log.Printf("raft: %v, I'm the leader!\n", r.id)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
@@ -248,8 +268,8 @@ func (r *Raft) becomeLeader() {
 }
 
 func (r *Raft) becomeCandidate() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
 	r.currentState = Candidate
 }
 
