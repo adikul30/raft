@@ -11,7 +11,7 @@ import (
 
 const (
 	MinWaitInMillis = 4000
-	MaxWaitInMillis = 7000
+	MaxWaitInMillis = 8000
 	HeartbeatInSecs = 1
 )
 
@@ -162,7 +162,7 @@ func (r *Raft) conductElection() {
 
 			if reply.VoteGranted {
 				totalVotes += 1
-			} else {
+			} else if reply.TermToUpdate > r.currentTerm {
 				r.currentTerm = reply.TermToUpdate
 			}
 		}(peer)
@@ -224,7 +224,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader {
-			log.Printf("raft: %v, I'm the leader!\n", r.id)
+			log.Printf("raft: %v, I'm the leader for term %v\n", r.id, r.currentTerm)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
