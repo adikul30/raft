@@ -49,6 +49,7 @@ type Raft struct {
 	commitIndex           int
 	lastApplied           int
 	lastUpdatedFromLeader time.Time
+	randomElectionTimeout int
 	currentState          State
 	id                    int
 	peers                 []Peer
@@ -60,31 +61,44 @@ type Raft struct {
 
 	// mutex
 	mu sync.Mutex
+
+	// to induce node failure
+	IsAlive bool
 }
 
 // election timeout goroutine
 func (r *Raft) electionTimeout() {
 	for {
 		r.mu.Lock()
-		if r.currentState != Leader {
-			randomElectionTimeoutInMillis := getRandomElectionTimeoutInMillis()
-			log.Printf("raft: %v, currentTerm: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, randomElectionTimeoutInMillis)
-			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
+		if r.currentState != Leader && r.IsAlive {
+			//randomElectionTimeoutInMillis := getRandomElectionTimeoutInMillis()
+			log.Printf("raft: %v, currentTerm: %v, lastUpdatedDiff: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds(), r.randomElectionTimeout)
+			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(r.randomElectionTimeout) {
 				r.mu.Unlock()
 				time.Sleep(1 * time.Second)
 				r.mu.Lock()
 			}
 
-			if r.currentState != Follower {
+			if r.currentState == Leader {
 				r.mu.Unlock()
 				continue
 			}
 
-			if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
-				r.mu.Unlock()
-				continue
-			}
+			//if r.currentState == Candidate {
+			//	if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
+			//
+			//	}
+			//	r.mu.Unlock()
+			//	continue
+			//}
 
+			//if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
+			//	r.mu.Unlock()
+			//	continue
+			//}
+
+			r.lastUpdatedFromLeader = time.Now()
+			r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 			r.becomeCandidate()
 			r.mu.Unlock()
 			go r.conductElection()
@@ -99,7 +113,7 @@ func (r *Raft) conductElection() {
 	totalVotes := 0
 	totalReceived := 0
 	r.mu.Lock()
-	if r.currentState == Follower {
+	if r.currentState == Follower || !r.IsAlive {
 		r.mu.Unlock()
 		return
 	}
@@ -107,6 +121,7 @@ func (r *Raft) conductElection() {
 	r.votedFor = &r.id
 	totalVotes += 1
 	r.lastUpdatedFromLeader = time.Now()
+	r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 	currentTermCopy := r.currentTerm
 	lastLogIndex := len(r.log) - 1
 	var lastEntry Entry
@@ -143,7 +158,7 @@ func (r *Raft) conductElection() {
 			}
 
 			reply := &RequestVoteReply{}
-			if r.currentState != Candidate {
+			if r.currentState != Candidate && r.IsAlive {
 				return
 			}
 			err := r.requestVoteRPC(p.Id, args, reply)
@@ -156,7 +171,7 @@ func (r *Raft) conductElection() {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 
-			if r.currentState != Candidate {
+			if r.currentState != Candidate && r.IsAlive {
 				return
 			}
 
@@ -164,6 +179,10 @@ func (r *Raft) conductElection() {
 				totalVotes += 1
 			} else if reply.TermToUpdate > r.currentTerm {
 				r.currentTerm = reply.TermToUpdate
+				// todo: fall back to follower?
+				//r.becomeFollower()
+				// r.lastUpdatedFromLeader = time.Now()
+				//r.votedFor = nil
 			}
 		}(peer)
 	}
@@ -186,28 +205,30 @@ func (r *Raft) conductElection() {
 		// todo: what to do after split vote or losing election?
 		r.becomeFollower()
 		r.lastUpdatedFromLeader = time.Now()
+		r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 		log.Printf("raft: %v suffering from split vote/lost election \n", r.id)
 	}
 }
 
 func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.IsAlive {
+		return errors.New("not alive! ")
+	}
 	if args.Term < r.currentTerm {
 		reply.VoteGranted = false
 		reply.TermToUpdate = r.currentTerm
-		r.mu.Unlock()
 		return nil
 	}
 
 	if r.votedFor == nil || *r.votedFor == args.CandidateId {
 		reply.VoteGranted = true
 		r.votedFor = &args.CandidateId
-		r.mu.Unlock()
 		return nil
 	}
 
 	reply.VoteGranted = false
-	r.mu.Unlock()
 	return nil
 
 	// todo 2B: also check if candidate's log is up-to-date
@@ -223,7 +244,7 @@ func getRandomElectionTimeoutInMillis() int {
 func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
-		if r.currentState == Leader {
+		if r.currentState == Leader && r.IsAlive {
 			log.Printf("raft: %v, I'm the leader for term %v\n", r.id, r.currentTerm)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
@@ -274,7 +295,9 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						if !reply.Success {
 							if reply.TermToUpdate > r.currentTerm {
 								r.currentTerm = reply.TermToUpdate
+								r.votedFor = nil
 								r.lastUpdatedFromLeader = time.Now()
+								r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 								r.becomeFollower()
 							} else {
 								// todo 2B: handle log inconsistency logic (section 5.3)
@@ -285,6 +308,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 						}
 					}(peer)
 				}
+				time.Sleep(500 * time.Millisecond)
 			} else {
 				r.mu.Unlock()
 				time.Sleep(500 * time.Millisecond)
@@ -299,7 +323,9 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// todo: from Leader?
+	if !r.IsAlive {
+		return errors.New("not alive! ")
+	}
 
 	if args.Term < r.currentTerm {
 		reply.Success = false
@@ -309,7 +335,9 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 
 	if args.Term >= r.currentTerm{
 		r.currentTerm = args.Term
+		r.votedFor = nil
 		r.lastUpdatedFromLeader = time.Now()
+		r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 		if r.currentState != Follower {
 			r.becomeFollower()
 		}
@@ -398,6 +426,8 @@ func Make(id int, peers []Peer) *Raft {
 	rf.id = id
 	rf.peers = peers
 	rf.lastUpdatedFromLeader = time.Now()
+	rf.randomElectionTimeout = getRandomElectionTimeoutInMillis()
+	rf.IsAlive = true
 	go rf.electionTimeout()
 	go rf.sendHeartbeatsAsLeader()
 

@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"strconv"
 	"sync"
+	"time"
 )
 
 const (
@@ -54,19 +55,23 @@ func main() {
 	}
 
 	fmt.Println("waiting...")
+	var currentLeader *raft.Raft
+	for currentLeader == nil {
+		totalLeaders := 0
+		for _, node := range cfg.rafts {
+			if node.IsLeader() {
+				currentLeader = node
+				totalLeaders += 1
+			}
+		}
+		if totalLeaders > 1 {
+			log.Fatalf("Two leaders!!")
+		}
+		time.Sleep(3 * time.Second)
+	}
 
-	//for {
-	//	totalLeaders := 0
-	//	for _, raft := range cfg.rafts {
-	//		if raft.IsLeader() {
-	//			totalLeaders += 1
-	//		}
-	//	}
-	//	if totalLeaders > 1 {
-	//		log.Fatalf("Two leaders!!")
-	//	}
-	//	time.Sleep(3 * time.Second)
-	//}
+	time.Sleep( 3 * time.Second)
+	currentLeader.IsAlive = false
 
 	wg.Wait()
 }
