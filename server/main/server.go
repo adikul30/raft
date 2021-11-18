@@ -54,7 +54,12 @@ func main() {
 		}(i, peer)
 	}
 
-	fmt.Println("waiting...")
+	//testReelection(&cfg)
+
+	wg.Wait()
+}
+
+func testReelection(cfg *config) {
 	var currentLeader *raft.Raft
 	for currentLeader == nil {
 		totalLeaders := 0
@@ -72,6 +77,4 @@ func main() {
 
 	time.Sleep( 3 * time.Second)
 	currentLeader.IsAlive = false
-
-	wg.Wait()
 }

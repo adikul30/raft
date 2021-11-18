@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/rpc"
@@ -66,12 +67,35 @@ type Raft struct {
 	IsAlive bool
 }
 
+type ExecuteReply struct {
+	Index int
+	IsReplicated bool
+}
+
+func (r *Raft) Execute(command Command, reply *ExecuteReply) error {
+	r.mu.Lock()
+	if r.currentState != Leader {
+		return errors.New("not a leader! ")
+	}
+
+	// append to local log
+	r.log = append(r.log, Entry{
+		Command: command,
+		Term:    r.currentTerm,
+	})
+
+	r.mu.Unlock()
+	commitIndex, isReplicated := r.replicateCommandToFollowers(false)
+	reply.Index = commitIndex
+	reply.IsReplicated = isReplicated
+	return nil
+}
+
 // election timeout goroutine
 func (r *Raft) electionTimeout() {
 	for {
 		r.mu.Lock()
 		if r.currentState != Leader && r.IsAlive {
-			//randomElectionTimeoutInMillis := getRandomElectionTimeoutInMillis()
 			log.Printf("raft: %v, currentTerm: %v, lastUpdatedDiff: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds(), r.randomElectionTimeout)
 			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(r.randomElectionTimeout) {
 				r.mu.Unlock()
@@ -84,25 +108,11 @@ func (r *Raft) electionTimeout() {
 				continue
 			}
 
-			//if r.currentState == Candidate {
-			//	if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
-			//
-			//	}
-			//	r.mu.Unlock()
-			//	continue
-			//}
-
-			//if time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(randomElectionTimeoutInMillis) {
-			//	r.mu.Unlock()
-			//	continue
-			//}
-
 			r.lastUpdatedFromLeader = time.Now()
 			r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 			r.becomeCandidate()
 			r.mu.Unlock()
 			go r.conductElection()
-			//}
 		} else {
 			r.mu.Unlock()
 		}
@@ -123,7 +133,7 @@ func (r *Raft) conductElection() {
 	r.lastUpdatedFromLeader = time.Now()
 	r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 	currentTermCopy := r.currentTerm
-	lastLogIndex := len(r.log) - 1
+	lastLogIndex := len(r.log)
 	var lastEntry Entry
 	if len(r.log) == 0 {
 		lastLogIndex = 0
@@ -204,8 +214,6 @@ func (r *Raft) conductElection() {
 	} else {
 		// todo: what to do after split vote or losing election?
 		r.becomeFollower()
-		r.lastUpdatedFromLeader = time.Now()
-		r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 		log.Printf("raft: %v suffering from split vote/lost election \n", r.id)
 	}
 }
@@ -222,7 +230,7 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 		return nil
 	}
 
-	if r.votedFor == nil || *r.votedFor == args.CandidateId {
+	if (r.votedFor == nil || *r.votedFor == args.CandidateId) && args.LastLogIndex >= len(r.log) {
 		reply.VoteGranted = true
 		r.votedFor = &args.CandidateId
 		return nil
@@ -230,8 +238,6 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 
 	reply.VoteGranted = false
 	return nil
-
-	// todo 2B: also check if candidate's log is up-to-date
 }
 
 func getRandomElectionTimeoutInMillis() int {
@@ -245,69 +251,13 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader && r.IsAlive {
-			log.Printf("raft: %v, I'm the leader for term %v\n", r.id, r.currentTerm)
+			log.Printf("raft: %v, log: %+v, I'm the leader for term %v\n", r.id, r.log, r.currentTerm)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
 				r.lastHeartbeatSent = time.Now()
-				currentTermCopy := r.currentTerm
-				commitIndexCopy := r.commitIndex
 				r.mu.Unlock()
-
-				for _, peer := range r.peers {
-					if peer.Id == r.id {
-						continue
-					}
-					go func(p Peer) {
-						//log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
-						//r.mu.Lock()
-						//totalLogs := len(r.log)
-						//nextIndex := r.nextIndex[p.Id]
-						//prevLogIndex := nextIndex - 1
-						prevLogIndex := 0
-						//prevLogIndexTerm := r.log[prevLogIndex].Term
-						prevLogIndexTerm := 0
-						//entries := make([]Entry, totalLogs-nextIndex)
-						entries := make([]Entry, 1)
-						//newOnes := r.log[nextIndex:]
-						//copy(entries, newOnes)
-						//r.mu.Unlock()
-
-						args := AppendEntriesArgs{
-							Term:         currentTermCopy,
-							LeaderId:     r.id,
-							PrevLogIndex: prevLogIndex,
-							PrevLogTerm:  prevLogIndexTerm,
-							Entries:      entries,
-							LeaderCommit: commitIndexCopy,
-						}
-
-						reply := &AppendEntriesReply{}
-						//log.Printf("raft: %v, calling appendEntriesRPC for %v!\n", r.id, p.Id)
-						err := r.appendEntriesRPC(p.Id, args, reply)
-						if err != nil {
-							log.Printf("AppendEntries: args: %+v error: %s\n", args, err.Error())
-							return
-						}
-						//log.Printf("raft: %v, from: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
-						r.mu.Lock()
-						defer r.mu.Unlock()
-						if !reply.Success {
-							if reply.TermToUpdate > r.currentTerm {
-								r.currentTerm = reply.TermToUpdate
-								r.votedFor = nil
-								r.lastUpdatedFromLeader = time.Now()
-								r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
-								r.becomeFollower()
-							} else {
-								// todo 2B: handle log inconsistency logic (section 5.3)
-							}
-						} else {
-							//r.nextIndex[p.Id] = totalLogs
-							//r.matchIndex[p.Id] = totalLogs - 1
-						}
-					}(peer)
-				}
+				_, _ = r.replicateCommandToFollowers(true)
 				time.Sleep(500 * time.Millisecond)
 			} else {
 				r.mu.Unlock()
@@ -316,6 +266,97 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 		} else {
 			r.mu.Unlock()
 		}
+	}
+}
+
+func (r *Raft) replicateCommandToFollowers(isHeartbeat bool) (int, bool) {
+	r.mu.Lock()
+	r.lastHeartbeatSent = time.Now()
+	currentTermCopy := r.currentTerm
+	commitIndexCopy := r.commitIndex
+	r.mu.Unlock()
+
+	for _, peer := range r.peers {
+		if peer.Id == r.id {
+			continue
+		}
+		go func(p Peer) {
+			//log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
+			r.mu.Lock()
+			totalLogs := len(r.log)
+			var prevLogIndexTerm, prevLogIndex int
+			var entries []Entry
+
+			if totalLogs == 0 {
+				prevLogIndex = 0
+				prevLogIndexTerm = 0
+			} else if len(r.log) >= r.nextIndex[p.Id] {
+				nextIndex := r.nextIndex[p.Id]
+				prevLogIndex = nextIndex - 1
+				if prevLogIndex == 0 { // case for first ever entry in the log to be replicated
+					prevLogIndexTerm = 0
+				} else {
+					prevLogIndexTerm = r.log[prevLogIndex].Term
+				}
+				if !isHeartbeat {
+					entries = make([]Entry, totalLogs-prevLogIndex)
+					newOnes := r.log[prevLogIndex:]
+					copy(entries, newOnes)
+				}
+			}
+			r.mu.Unlock()
+
+			args := AppendEntriesArgs{
+				Term:         currentTermCopy,
+				LeaderId:     r.id,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogIndexTerm,
+				Entries:      entries,
+				LeaderCommit: commitIndexCopy,
+			}
+
+			reply := &AppendEntriesReply{}
+			//log.Printf("raft: %v, calling appendEntriesRPC for %v!\n", r.id, p.Id)
+			err := r.appendEntriesRPC(p.Id, args, reply)
+			if err != nil {
+				log.Printf("AppendEntries: args: %+v error: %s\n", args, err.Error())
+				return
+			}
+			log.Printf("raft: %v, isHeartbeat: %v, from: %v, AppendEntries: args: %+v; reply: %v\n", r.id, isHeartbeat, p.Id, args, reply)
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if !reply.Success {
+				if reply.TermToUpdate > r.currentTerm {
+					r.currentTerm = reply.TermToUpdate
+					r.becomeFollower()
+				} else {
+					// todo 2B: handle log inconsistency logic (section 5.3)
+				}
+			} else {
+				r.nextIndex[p.Id] = totalLogs + 1
+				r.matchIndex[p.Id] = r.nextIndex[p.Id] - 1
+				// todo: can place call to updateCommitIndex() here
+			}
+		}(peer)
+	}
+	r.updateCommitIndex()
+	// todo: check majority of responses before returning true
+	return -1, false
+}
+
+func (r *Raft) updateCommitIndex() {
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
+
+	N := r.matchIndex[0]
+	for _, index := range r.matchIndex {
+		if index < N {
+			N = index
+		}
+	}
+
+	if N > r.commitIndex && r.log[N].Term == r.currentTerm {
+		r.commitIndex = N
 	}
 }
 
@@ -333,37 +374,56 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		return nil
 	}
 
-	if args.Term >= r.currentTerm{
+	if len(args.Entries) == 0 {
+		// heartbeat
 		r.currentTerm = args.Term
-		r.votedFor = nil
-		r.lastUpdatedFromLeader = time.Now()
-		r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
-		if r.currentState != Follower {
-			r.becomeFollower()
-		}
+		r.becomeFollower()
 		reply.Success = true
-		reply.TermToUpdate = args.Term
-		log.Printf("raft: %v, changing self to follower, following leader: %v!\n", r.id, args.LeaderId)
+		log.Printf("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
 		return nil
 	}
 
-	// todo 2B: check for other conditions
-	return errors.New("unexpected state! ")
+	if len(r.log) == 0 {
+		// first entry
+		r.log = append(r.log, args.Entries...)
+		reply.Success = true
+	} else {
+		if r.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm {
+			reply.Success = false
+		} else {
+			// todo: receiver implementation: might not work as combined pt.3 and 4
+			r.log = r.log[:args.PrevLogIndex]
+			r.log = append(r.log, args.Entries...)
+			reply.Success = true
+		}
+	}
+
+	if reply.Success {
+		if args.LeaderCommit > r.commitIndex {
+			r.commitIndex = args.LeaderCommit
+		}
+	}
+
+	log.Printf("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
+	return nil
 }
 
 func (r *Raft) becomeFollower() {
-	//r.mu.Lock()
-	//defer r.mu.Unlock()
 	r.currentState = Follower
+	r.votedFor = nil
+	r.lastUpdatedFromLeader = time.Now()
+	r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 }
 
 func (r *Raft) becomeLeader() {
 	r.currentState = Leader
+	for i, _ := range r.nextIndex {
+		r.nextIndex[i] = len(r.log) + 1
+		r.matchIndex[i] = 0
+	}
 }
 
 func (r *Raft) becomeCandidate() {
-	//r.mu.Lock()
-	//defer r.mu.Unlock()
 	r.currentState = Candidate
 }
 
@@ -371,6 +431,20 @@ func (r *Raft) IsLeader() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.currentState == Leader
+}
+
+type GetNodeArgs struct {
+	Dummy int
+}
+
+type GetNodeReply struct {
+	IsLeader bool
+}
+
+func (r *Raft) GetNode(args GetNodeArgs, reply *GetNodeReply) error {
+	reply.IsLeader = r.IsLeader()
+	fmt.Printf("raft: %v isLeader: %v\n", r.id, reply.IsLeader)
+	return nil
 }
 
 func getMajority(N int) int {
@@ -384,30 +458,6 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	TermToUpdate int
 	VoteGranted  bool
-}
-
-func (r *Raft) requestVoteRPC(peerId int, args RequestVoteArgs, reply *RequestVoteReply) error {
-	if r.peers[peerId].Client == nil {
-		r.constructClientEndpoint(peerId)
-	}
-	err := r.peers[peerId].Client.Call("Raft.RequestVote", args, reply)
-	return err
-}
-
-func (r *Raft) appendEntriesRPC(peerId int, args AppendEntriesArgs, reply *AppendEntriesReply) error {
-	if r.peers[peerId].Client == nil {
-		r.constructClientEndpoint(peerId)
-	}
-	err := r.peers[peerId].Client.Call("Raft.AppendEntries", args, reply)
-	return err
-}
-
-func (r *Raft) constructClientEndpoint(peerId int) {
-	client, err := rpc.DialHTTP("tcp", "127.0.0.1:" + r.peers[peerId].Port)
-	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	r.peers[peerId].Client = client
 }
 
 type AppendEntriesArgs struct {
@@ -428,6 +478,8 @@ func Make(id int, peers []Peer) *Raft {
 	rf.lastUpdatedFromLeader = time.Now()
 	rf.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 	rf.IsAlive = true
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 	go rf.electionTimeout()
 	go rf.sendHeartbeatsAsLeader()
 
