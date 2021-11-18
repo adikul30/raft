@@ -56,7 +56,31 @@ func main() {
 
 	//testReelection(&cfg)
 
+	testLogAfterFailure(&cfg)
+
 	wg.Wait()
+}
+
+func testLogAfterFailure(cfg *config) {
+	var currentLeader *raft.Raft
+	for currentLeader == nil {
+		totalLeaders := 0
+		for _, node := range cfg.rafts {
+			if node.IsLeader() {
+				currentLeader = node
+				totalLeaders += 1
+			}
+		}
+		if totalLeaders > 1 {
+			log.Fatalf("Two leaders!!")
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	time.Sleep(3 * time.Second)
+	currentLeader.IsAlive = false
+	time.Sleep(30 * time.Second)
+	currentLeader.IsAlive = true
 }
 
 func testReelection(cfg *config) {
