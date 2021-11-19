@@ -54,6 +54,7 @@ type Raft struct {
 	currentState          State
 	id                    int
 	peers                 []Peer
+	leaderId int
 
 	// leader
 	nextIndex         []int
@@ -85,7 +86,7 @@ func (r *Raft) Execute(command Command, reply *ExecuteReply) error {
 	})
 
 	r.mu.Unlock()
-	commitIndex, isReplicated := r.replicateCommandToFollowers(false)
+	commitIndex, isReplicated := r.replicateCommandToFollowers()
 	reply.Index = commitIndex
 	reply.IsReplicated = isReplicated
 	return nil
@@ -133,14 +134,13 @@ func (r *Raft) conductElection() {
 	r.lastUpdatedFromLeader = time.Now()
 	r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 	currentTermCopy := r.currentTerm
-	lastLogIndex := len(r.log)
-	var lastEntry Entry
+	var lastLogIndex, lastLogTerm int
 	if len(r.log) == 0 {
-		lastLogIndex = 0
-		lastEntry = Entry{Term: 0}
+		lastLogIndex = -1
+		lastLogTerm = -1
 	} else {
 		lastLogIndex = len(r.log) - 1
-		lastEntry = r.log[lastLogIndex]
+		lastLogTerm = r.log[lastLogIndex].Term
 	}
 
 	majority := getMajority(len(r.peers))
@@ -164,7 +164,7 @@ func (r *Raft) conductElection() {
 				Term:         currentTermCopy,
 				CandidateId:  r.id,
 				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastEntry.Term,
+				LastLogTerm:  lastLogTerm,
 			}
 
 			reply := &RequestVoteReply{}
@@ -190,9 +190,7 @@ func (r *Raft) conductElection() {
 			} else if reply.TermToUpdate > r.currentTerm {
 				r.currentTerm = reply.TermToUpdate
 				// todo: fall back to follower?
-				//r.becomeFollower()
-				// r.lastUpdatedFromLeader = time.Now()
-				//r.votedFor = nil
+				r.becomeFollower()
 			}
 		}(peer)
 	}
@@ -230,13 +228,25 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 		return nil
 	}
 
-	if (r.votedFor == nil || *r.votedFor == args.CandidateId) && args.LastLogIndex >= len(r.log) {
+	// todo: candidate's log should be at least up-to-date as receiver's log
+	var lastLogIndex, lastLogTerm int
+	if len(r.log) == 0 {
+		lastLogIndex = -1
+		lastLogTerm = -1
+	} else {
+		lastLogIndex = len(r.log)-1
+		lastLogTerm = r.log[lastLogIndex].Term
+	}
+
+	if (r.votedFor == nil || *r.votedFor == args.CandidateId) && (args.LastLogIndex >= lastLogIndex && args.LastLogTerm >= lastLogTerm) {
 		reply.VoteGranted = true
 		r.votedFor = &args.CandidateId
+		r.lastUpdatedFromLeader = time.Now()
 		return nil
 	}
 
 	reply.VoteGranted = false
+	reply.TermToUpdate = r.currentTerm
 	return nil
 }
 
@@ -257,7 +267,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 			if duration.Seconds() > float64(HeartbeatInSecs) {
 				r.lastHeartbeatSent = time.Now()
 				r.mu.Unlock()
-				_, _ = r.replicateCommandToFollowers(true)
+				_, _ = r.replicateCommandToFollowers()
 				time.Sleep(500 * time.Millisecond)
 			} else {
 				r.mu.Unlock()
@@ -269,7 +279,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	}
 }
 
-func (r *Raft) replicateCommandToFollowers(isHeartbeat bool) (int, bool) {
+func (r *Raft) replicateCommandToFollowers() (int, bool) {
 	r.mu.Lock()
 	r.lastHeartbeatSent = time.Now()
 	currentTermCopy := r.currentTerm
@@ -282,28 +292,28 @@ func (r *Raft) replicateCommandToFollowers(isHeartbeat bool) (int, bool) {
 		}
 		go func(p Peer) {
 			//log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
+			//log.Printf("raft: %v, r.nextIndex %v\n", r.id, r.nextIndex)
 			r.mu.Lock()
 			totalLogs := len(r.log)
-			var prevLogIndexTerm, prevLogIndex int
+			var prevLogIndexTerm, prevLogIndex, nextIndex int
 			var entries []Entry
 
 			if totalLogs == 0 {
-				prevLogIndex = 0
-				prevLogIndexTerm = 0
-			} else if len(r.log) >= r.nextIndex[p.Id] {
-				nextIndex := r.nextIndex[p.Id]
+				prevLogIndex = -1
+				prevLogIndexTerm = -1
+			} else {
+				nextIndex = r.nextIndex[p.Id]
 				prevLogIndex = nextIndex - 1
-				if prevLogIndex == 0 { // case for first ever entry in the log to be replicated
-					prevLogIndexTerm = 0
+				if prevLogIndex == -1 {
+					prevLogIndexTerm = -1
 				} else {
 					prevLogIndexTerm = r.log[prevLogIndex].Term
 				}
-				if !isHeartbeat {
-					entries = make([]Entry, totalLogs-prevLogIndex)
-					newOnes := r.log[prevLogIndex:]
-					copy(entries, newOnes)
-				}
 			}
+			entries = make([]Entry, totalLogs-nextIndex)
+			newOnes := r.log[nextIndex:]
+			copy(entries, newOnes)
+
 			r.mu.Unlock()
 
 			args := AppendEntriesArgs{
@@ -316,13 +326,13 @@ func (r *Raft) replicateCommandToFollowers(isHeartbeat bool) (int, bool) {
 			}
 
 			reply := &AppendEntriesReply{}
-			//log.Printf("raft: %v, calling appendEntriesRPC for %v!\n", r.id, p.Id)
+			log.Printf("raft: %v, to: %v, calling appendEntriesRPC with args: %+v\n", r.id, p.Id, args)
 			err := r.appendEntriesRPC(p.Id, args, reply)
 			if err != nil {
 				log.Printf("AppendEntries: args: %+v error: %s\n", args, err.Error())
 				return
 			}
-			log.Printf("raft: %v, isHeartbeat: %v, from: %v, AppendEntries: args: %+v; reply: %v\n", r.id, isHeartbeat, p.Id, args, reply)
+			log.Printf("raft: %v, to: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			if !reply.Success {
@@ -330,10 +340,12 @@ func (r *Raft) replicateCommandToFollowers(isHeartbeat bool) (int, bool) {
 					r.currentTerm = reply.TermToUpdate
 					r.becomeFollower()
 				} else {
-					// todo 2B: handle log inconsistency logic (section 5.3)
+					// If AppendEntries fails because of log inconsistency:
+					//decrement nextIndex and retry
+					r.nextIndex[p.Id] -= 1
 				}
 			} else {
-				r.nextIndex[p.Id] = totalLogs + 1
+				r.nextIndex[p.Id] = nextIndex + len(entries)
 				r.matchIndex[p.Id] = r.nextIndex[p.Id] - 1
 				// todo: can place call to updateCommitIndex() here
 			}
@@ -363,49 +375,55 @@ func (r *Raft) updateCommitIndex() {
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	//log.Printf("raft: %v, log: %+v, received AppendEntries args: %+v\n", r.id, r.log, args)
 
 	if !r.IsAlive {
 		return errors.New("not alive! ")
 	}
 
+	// 1. Reply false if term < currentTerm
 	if args.Term < r.currentTerm {
 		reply.Success = false
 		reply.TermToUpdate = r.currentTerm
 		return nil
-	}
-
-	if len(args.Entries) == 0 {
-		// heartbeat
+	} else {
 		r.currentTerm = args.Term
 		r.becomeFollower()
+
+		// 2. Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+		if args.PrevLogIndex == -1 {
+			// case: heartbeat when no commands have been issued by client
+			// or the first command to replicate
+			reply.Success = true
+		} else if r.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			//reply.TermToUpdate = r.currentTerm
+			return nil
+		}
+
+		//existingEntries := r.log[args.PrevLogIndex+1:]
+		//newOnes := args.Entries
+
+		// 3. If an existing entry conflicts with a new one (same index
+		//but different terms), delete the existing entry and all that
+		//follow it
+
+		// 4. Append any new entries not already in the log
+
+		// todo: might not work as pt.3 and 4 and have been combined
+		r.log = r.log[:args.PrevLogIndex+1]
+		r.log = append(r.log, args.Entries...)
 		reply.Success = true
+
+		if reply.Success {
+			if args.LeaderCommit > r.commitIndex {
+				r.commitIndex = args.LeaderCommit
+			}
+		}
+
 		log.Printf("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
 		return nil
 	}
-
-	if len(r.log) == 0 {
-		// first entry
-		r.log = append(r.log, args.Entries...)
-		reply.Success = true
-	} else {
-		if r.log[args.PrevLogIndex - 1].Term != args.PrevLogTerm {
-			reply.Success = false
-		} else {
-			// todo: receiver implementation: might not work as combined pt.3 and 4
-			r.log = r.log[:args.PrevLogIndex]
-			r.log = append(r.log, args.Entries...)
-			reply.Success = true
-		}
-	}
-
-	if reply.Success {
-		if args.LeaderCommit > r.commitIndex {
-			r.commitIndex = args.LeaderCommit
-		}
-	}
-
-	log.Printf("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
-	return nil
 }
 
 func (r *Raft) becomeFollower() {
@@ -418,8 +436,8 @@ func (r *Raft) becomeFollower() {
 func (r *Raft) becomeLeader() {
 	r.currentState = Leader
 	for i, _ := range r.nextIndex {
-		r.nextIndex[i] = len(r.log) + 1
-		r.matchIndex[i] = 0
+		r.nextIndex[i] = len(r.log)
+		r.matchIndex[i] = -1
 	}
 }
 

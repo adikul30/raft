@@ -56,7 +56,7 @@ func main() {
 
 	//testReelection(&cfg)
 
-	testLogAfterFailure(&cfg)
+	//testLogAfterFailure(&cfg)
 
 	wg.Wait()
 }
