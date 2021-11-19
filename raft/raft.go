@@ -2,8 +2,7 @@ package raft
 
 import (
 	"errors"
-	"fmt"
-	"log"
+	"github.com/golang/glog"
 	"math/rand"
 	"net/rpc"
 	"sync"
@@ -97,7 +96,7 @@ func (r *Raft) electionTimeout() {
 	for {
 		r.mu.Lock()
 		if r.currentState != Leader && r.IsAlive {
-			log.Printf("raft: %v, currentTerm: %v, lastUpdatedDiff: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds(), r.randomElectionTimeout)
+			glog.V(1).Infof("raft: %v, currentTerm: %v, lastUpdatedDiff: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds(), r.randomElectionTimeout)
 			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(r.randomElectionTimeout) {
 				r.mu.Unlock()
 				time.Sleep(1 * time.Second)
@@ -148,7 +147,7 @@ func (r *Raft) conductElection() {
 
 	cond := sync.NewCond(&r.mu)
 
-	log.Printf("raft: %v, let's get some votes for term: %v\n", r.id, r.currentTerm)
+	glog.V(1).Infof("raft: %v, let's get some votes for term: %v\n", r.id, r.currentTerm)
 
 	for _, peer := range r.peers {
 		if peer.Id == r.id {
@@ -173,10 +172,10 @@ func (r *Raft) conductElection() {
 			}
 			err := r.requestVoteRPC(p.Id, args, reply)
 			if err != nil {
-				log.Printf("raft: %v, from: %v, RequestVote: args: %+v error: %s\n", r.id, p.Id, args, err.Error())
+				glog.Errorf("raft: %v, from: %v, RequestVote: args: %+v error: %s\n", r.id, p.Id, args, err.Error())
 				return
 			}
-			log.Printf("raft: %v, from: %v, RequestVote: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
+			glog.V(2).Infof("raft: %v, from: %v, RequestVote: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
 
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -207,12 +206,12 @@ func (r *Raft) conductElection() {
 	}
 
 	if totalVotes >= majority {
-		log.Printf("raft: %v won election for term: %v \n", r.id, r.currentTerm)
+		glog.V(2).Infof("raft: %v won election for term: %v \n", r.id, r.currentTerm)
 		r.becomeLeader()
 	} else {
 		// todo: what to do after split vote or losing election?
 		r.becomeFollower()
-		log.Printf("raft: %v suffering from split vote/lost election \n", r.id)
+		glog.V(1).Infof("raft: %v suffering from split vote/lost election \n", r.id)
 	}
 }
 
@@ -261,7 +260,7 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader && r.IsAlive {
-			log.Printf("raft: %v, log: %+v, I'm the leader for term %v\n", r.id, r.log, r.currentTerm)
+			glog.V(1).Infof("raft: %v, log: %+v, I'm the leader for term %v\n", r.id, r.log, r.currentTerm)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
@@ -291,8 +290,8 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 			continue
 		}
 		go func(p Peer) {
-			//log.Printf("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
-			//log.Printf("raft: %v, r.nextIndex %v\n", r.id, r.nextIndex)
+			//glog.V(1).Infof("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
+			//glog.V(1).Infof("raft: %v, r.nextIndex %v\n", r.id, r.nextIndex)
 			r.mu.Lock()
 			totalLogs := len(r.log)
 			var prevLogIndexTerm, prevLogIndex, nextIndex int
@@ -326,13 +325,13 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 			}
 
 			reply := &AppendEntriesReply{}
-			log.Printf("raft: %v, to: %v, calling appendEntriesRPC with args: %+v\n", r.id, p.Id, args)
+			glog.V(2).Infof("raft: %v, to: %v, calling appendEntriesRPC with args: %+v\n", r.id, p.Id, args)
 			err := r.appendEntriesRPC(p.Id, args, reply)
 			if err != nil {
-				log.Printf("AppendEntries: args: %+v error: %s\n", args, err.Error())
+				glog.Errorf("AppendEntries: args: %+v error: %s\n", args, err.Error())
 				return
 			}
-			log.Printf("raft: %v, to: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
+			glog.V(2).Infof("raft: %v, to: %v, AppendEntries: args: %+v; reply: %v\n", r.id, p.Id, args, reply)
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			if !reply.Success {
@@ -375,7 +374,7 @@ func (r *Raft) updateCommitIndex() {
 func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	//log.Printf("raft: %v, log: %+v, received AppendEntries args: %+v\n", r.id, r.log, args)
+	//glog.V(1).Infof("raft: %v, log: %+v, received AppendEntries args: %+v\n", r.id, r.log, args)
 
 	if !r.IsAlive {
 		return errors.New("not alive! ")
@@ -421,7 +420,7 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 			}
 		}
 
-		log.Printf("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
+		glog.V(1).Infof("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
 		return nil
 	}
 }
@@ -461,7 +460,7 @@ type GetNodeReply struct {
 
 func (r *Raft) GetNode(args GetNodeArgs, reply *GetNodeReply) error {
 	reply.IsLeader = r.IsLeader()
-	fmt.Printf("raft: %v isLeader: %v\n", r.id, reply.IsLeader)
+	glog.V(2).Infof("raft: %v isLeader: %v\n", r.id, reply.IsLeader)
 	return nil
 }
 

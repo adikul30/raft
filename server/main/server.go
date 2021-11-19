@@ -2,6 +2,7 @@ package main
 
 import (
 	"Raft/raft"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	_ "github.com/golang/glog"
 )
 
 const (
@@ -18,6 +20,12 @@ const (
 
 type config struct {
 	rafts []*raft.Raft
+}
+
+func init() {
+	// NOTE: This next line is key you have to call flag.Parse() for the command line
+	// options or "flags" that are defined in the glog module to be picked up.
+	flag.Parse()
 }
 
 func main() {
@@ -79,7 +87,7 @@ func testLogAfterFailure(cfg *config) {
 
 	time.Sleep(3 * time.Second)
 	currentLeader.IsAlive = false
-	time.Sleep(30 * time.Second)
+	time.Sleep(45 * time.Second)
 	currentLeader.IsAlive = true
 }
 
