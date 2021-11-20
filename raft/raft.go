@@ -5,6 +5,7 @@ import (
 	"github.com/golang/glog"
 	"math/rand"
 	"net/rpc"
+	"sort"
 	"sync"
 	"time"
 )
@@ -83,6 +84,7 @@ func (r *Raft) Execute(command Command, reply *ExecuteReply) error {
 		Command: command,
 		Term:    r.currentTerm,
 	})
+	r.matchIndex[r.id] += 1
 
 	r.mu.Unlock()
 	commitIndex, isReplicated := r.replicateCommandToFollowers()
@@ -154,7 +156,6 @@ func (r *Raft) conductElection() {
 			continue
 		}
 		go func(p Peer) {
-			// todo: might have to make lastLogIndex => lastLogIndex + 1
 			defer func() {
 				totalReceived += 1
 				cond.Broadcast()
@@ -188,7 +189,6 @@ func (r *Raft) conductElection() {
 				totalVotes += 1
 			} else if reply.TermToUpdate > r.currentTerm {
 				r.currentTerm = reply.TermToUpdate
-				// todo: fall back to follower?
 				r.becomeFollower()
 			}
 		}(peer)
@@ -209,7 +209,6 @@ func (r *Raft) conductElection() {
 		glog.V(2).Infof("raft: %v won election for term: %v \n", r.id, r.currentTerm)
 		r.becomeLeader()
 	} else {
-		// todo: what to do after split vote or losing election?
 		r.becomeFollower()
 		glog.V(1).Infof("raft: %v suffering from split vote/lost election \n", r.id)
 	}
@@ -227,7 +226,7 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 		return nil
 	}
 
-	// todo: candidate's log should be at least up-to-date as receiver's log
+	// candidate's log should be at least up-to-date as receiver's log
 	var lastLogIndex, lastLogTerm int
 	if len(r.log) == 0 {
 		lastLogIndex = -1
@@ -260,7 +259,8 @@ func (r *Raft) sendHeartbeatsAsLeader() {
 	for {
 		r.mu.Lock()
 		if r.currentState == Leader && r.IsAlive {
-			glog.V(1).Infof("raft: %v, log: %+v, I'm the leader for term %v\n", r.id, r.log, r.currentTerm)
+			//glog.V(1).Infof("raft: %v, log: %v, nextIndex: %v, matchIndex: %v, I'm the leader for term %v\n", r.id, r.log, r.nextIndex, r.matchIndex, r.currentTerm)
+			glog.V(1).Infof("raft: %v, log: %v, commitIndex: %v, nextIndex: %v, matchIndex: %v, term %v\n", r.id, r.log, r.commitIndex, r.nextIndex, r.matchIndex, r.currentTerm)
 			currentTime := time.Now()
 			duration := currentTime.Sub(r.lastHeartbeatSent)
 			if duration.Seconds() > float64(HeartbeatInSecs) {
@@ -285,13 +285,17 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 	commitIndexCopy := r.commitIndex
 	r.mu.Unlock()
 
+	majority := getMajority(len(r.peers))
+	totalReplications := 0
+	totalResponses := 0
+	cond := sync.NewCond(&r.mu)
+
 	for _, peer := range r.peers {
 		if peer.Id == r.id {
 			continue
 		}
 		go func(p Peer) {
-			//glog.V(1).Infof("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
-			//glog.V(1).Infof("raft: %v, r.nextIndex %v\n", r.id, r.nextIndex)
+			glog.V(2).Infof("raft: %v, sending heartbeat to %v!\n", r.id, p.Id)
 			r.mu.Lock()
 			totalLogs := len(r.log)
 			var prevLogIndexTerm, prevLogIndex, nextIndex int
@@ -346,28 +350,40 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 			} else {
 				r.nextIndex[p.Id] = nextIndex + len(entries)
 				r.matchIndex[p.Id] = r.nextIndex[p.Id] - 1
-				// todo: can place call to updateCommitIndex() here
+				totalReplications += 1
+				cond.Broadcast()
 			}
 		}(peer)
 	}
-	r.updateCommitIndex()
-	// todo: check majority of responses before returning true
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for totalReplications < majority && totalResponses != len(r.peers) - 1 {
+		cond.Wait()
+	}
+
+	if totalReplications >= majority {
+		r.updateCommitIndex()
+		return r.commitIndex, true
+	}
+
 	return -1, false
 }
 
 func (r *Raft) updateCommitIndex() {
-	//r.mu.Lock()
-	//defer r.mu.Unlock()
-
-	N := r.matchIndex[0]
-	for _, index := range r.matchIndex {
-		if index < N {
-			N = index
-		}
+	if len(r.log) <= 0 {
+		return
 	}
 
-	if N > r.commitIndex && r.log[N].Term == r.currentTerm {
-		r.commitIndex = N
+	temp := make([]int, len(r.matchIndex))
+	copy(temp, r.matchIndex)
+	sort.Ints(temp)
+	majority := getMajority(len(r.peers))
+	for i := majority - 1; i >= 0; i-- {
+		if temp[i] > r.commitIndex && r.log[temp[i]].Term == r.currentTerm {
+			r.commitIndex = temp[i]
+			break
+		}
 	}
 }
 
@@ -409,7 +425,6 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 
 		// 4. Append any new entries not already in the log
 
-		// todo: might not work as pt.3 and 4 and have been combined
 		r.log = r.log[:args.PrevLogIndex+1]
 		r.log = append(r.log, args.Entries...)
 		reply.Success = true
@@ -420,7 +435,7 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 			}
 		}
 
-		glog.V(1).Infof("raft: %v, log: %+v, following leader: %v\n", r.id, r.log, args.LeaderId)
+		glog.V(1).Infof("raft: %v, log: %v, following leader: %v\n", r.id, r.log, args.LeaderId)
 		return nil
 	}
 }
@@ -495,6 +510,7 @@ func Make(id int, peers []Peer) *Raft {
 	rf.lastUpdatedFromLeader = time.Now()
 	rf.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 	rf.IsAlive = true
+	rf.commitIndex = -1
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	go rf.electionTimeout()

@@ -42,8 +42,8 @@ func main() {
 	}
 
 	args := &raft.Command{
-		Variable: "X",
-		Value:    3,
+		Variable: "Y",
+		Value:    5,
 	}
 	var reply raft.ExecuteReply
 	err = client.Call("Raft.Execute", args, &reply)
