@@ -23,8 +23,6 @@ type config struct {
 }
 
 func init() {
-	// NOTE: This next line is key you have to call flag.Parse() for the command line
-	// options or "flags" that are defined in the glog module to be picked up.
 	flag.Parse()
 }
 
