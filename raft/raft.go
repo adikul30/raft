@@ -286,7 +286,7 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 	r.mu.Unlock()
 
 	majority := getMajority(len(r.peers))
-	totalReplications := 0
+	totalReplications := 1
 	totalResponses := 0
 	cond := sync.NewCond(&r.mu)
 
@@ -332,6 +332,8 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 			glog.V(2).Infof("raft: %v, to: %v, calling appendEntriesRPC with args: %+v\n", r.id, p.Id, args)
 			err := r.appendEntriesRPC(p.Id, args, reply)
 			if err != nil {
+				totalResponses += 1
+				cond.Broadcast()
 				glog.Errorf("AppendEntries: args: %+v error: %s\n", args, err.Error())
 				return
 			}

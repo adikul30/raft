@@ -4,6 +4,7 @@ import (
 	"Raft/raft"
 	"flag"
 	"fmt"
+	_ "github.com/golang/glog"
 	"log"
 	"net"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	_ "github.com/golang/glog"
 )
 
 const (
@@ -60,7 +60,7 @@ func main() {
 		}(i, peer)
 	}
 
-	//testReelection(&cfg)
+	testReelection(&cfg)
 
 	//testLogAfterFailure(&cfg)
 
