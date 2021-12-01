@@ -27,7 +27,7 @@ RPC
 For RPC, go has the built-in package https://pkg.go.dev/net/rpc
 For the methods to be exported, they have to follow certain criteria which is explained in the package docs.
 Methods here follow that criteria for the RPC to work.
- */
+*/
 
 const (
 	MinWaitInMillis = 4000
@@ -47,6 +47,7 @@ type Entry struct {
 
 type State int
 
+// similar to enum in Java
 const (
 	Follower State = iota
 	Candidate
@@ -73,7 +74,7 @@ type Raft struct {
 	currentState          State
 	id                    int
 	peers                 []Peer
-	leaderId int
+	leaderId              int
 
 	// leader
 	nextIndex         []int
@@ -88,7 +89,7 @@ type Raft struct {
 }
 
 type ExecuteReply struct {
-	Index int
+	Index        int
 	IsReplicated bool
 }
 
@@ -218,13 +219,13 @@ func (r *Raft) conductElection() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	/*
-	goroutines die if their enclosing method is completed unlike in Java.
-	a common pattern to wait for goroutines to complete is to use condition variables.
-	with condition variables, we sleep the main thread till a certain condition becomes true.
-	In this case, we wait till we either attain majority or receive responses from all nodes.
-	In this way, we don't get blocked waiting on a single node failure.
+		goroutines die if their enclosing method is completed unlike in Java.
+		a common pattern to wait for goroutines to complete is to use condition variables.
+		with condition variables, we sleep the main thread till a certain condition becomes true.
+		In this case, we wait till we either attain majority or receive responses from all nodes.
+		In this way, we don't get blocked waiting on a single node failure.
 	*/
-	for !hasAttainedMajority(totalVotes, len(r.peers)) && totalReceived != len(r.peers) - 1 {
+	for !hasAttainedMajority(totalVotes, len(r.peers)) && totalReceived != len(r.peers)-1 {
 		cond.Wait() // this is the equivalent of object.wait() in Java
 	}
 
@@ -260,7 +261,7 @@ func (r *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error 
 		lastLogIndex = -1
 		lastLogTerm = -1
 	} else {
-		lastLogIndex = len(r.log)-1
+		lastLogIndex = len(r.log) - 1
 		lastLogTerm = r.log[lastLogIndex].Term
 	}
 
@@ -400,7 +401,7 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 		In this case, we wait till we either replicate command to majority or receive responses from all nodes.
 		In this way, we don't get blocked waiting on a single node failure.
 	*/
-	for !hasAttainedMajority(totalReplications, len(r.peers)) && totalResponses != len(r.peers) - 1 {
+	for !hasAttainedMajority(totalReplications, len(r.peers)) && totalResponses != len(r.peers)-1 {
 		cond.Wait()
 	}
 
