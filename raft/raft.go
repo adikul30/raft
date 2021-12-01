@@ -3,12 +3,31 @@ package raft
 import (
 	"errors"
 	"github.com/golang/glog"
+	"math"
 	"math/rand"
 	"net/rpc"
 	"sort"
 	"sync"
 	"time"
 )
+
+/*
+Raft
+
+We implement leader election and log replication as stated in pg 4. of the original Raft paper.
+
+Raft is meant to be an implementation easy consensus algorithm.
+
+Thus, the paper includes the names of the RPCs to implement, the state for each node to maintain and the behavior for each RPC response.
+
+In that regard, we have followed the paper to the T, keeping the variable and method names consistent with the paper.
+
+RPC
+
+For RPC, go has the built-in package https://pkg.go.dev/net/rpc
+For the methods to be exported, they have to follow certain criteria which is explained in the package docs.
+Methods here follow that criteria for the RPC to work.
+ */
 
 const (
 	MinWaitInMillis = 4000
@@ -95,10 +114,12 @@ func (r *Raft) Execute(command Command, reply *ExecuteReply) error {
 
 // election timeout goroutine
 func (r *Raft) electionTimeout() {
-	for {
+	for { // this is the equivalent of while(true) in other languages
 		r.mu.Lock()
 		if r.currentState != Leader && r.IsAlive {
 			glog.V(1).Infof("raft: %v, currentTerm: %v, lastUpdatedDiff: %v, randomElectionTimeoutInSecs: %v\n", r.id, r.currentTerm, time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds(), r.randomElectionTimeout)
+
+			// if sufficient time has not elapsed since the last leader update, we need to wait/sleep
 			for time.Now().Sub(r.lastUpdatedFromLeader).Milliseconds() < int64(r.randomElectionTimeout) {
 				r.mu.Unlock()
 				time.Sleep(1 * time.Second)
@@ -110,7 +131,7 @@ func (r *Raft) electionTimeout() {
 				continue
 			}
 
-			r.lastUpdatedFromLeader = time.Now()
+			r.lastUpdatedFromLeader = time.Now() // fix required so the same node doesn't start another election
 			r.randomElectionTimeout = getRandomElectionTimeoutInMillis()
 			r.becomeCandidate()
 			r.mu.Unlock()
@@ -158,7 +179,7 @@ func (r *Raft) conductElection() {
 		go func(p Peer) {
 			defer func() {
 				totalReceived += 1
-				cond.Broadcast()
+				cond.Broadcast() // // this is the equivalent of object.notify() in Java
 			}()
 			args := RequestVoteArgs{
 				Term:         currentTermCopy,
@@ -196,8 +217,15 @@ func (r *Raft) conductElection() {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for totalVotes < majority && totalReceived != len(r.peers) - 1 {
-		cond.Wait()
+	/*
+	goroutines die if their enclosing method is completed unlike in Java.
+	a common pattern to wait for goroutines to complete is to use condition variables.
+	with condition variables, we sleep the main thread till a certain condition becomes true.
+	In this case, we wait till we either attain majority or receive responses from all nodes.
+	In this way, we don't get blocked waiting on a single node failure.
+	*/
+	for !hasAttainedMajority(totalVotes, len(r.peers)) && totalReceived != len(r.peers) - 1 {
+		cond.Wait() // this is the equivalent of object.wait() in Java
 	}
 
 	if r.currentState != Candidate {
@@ -252,6 +280,13 @@ func getRandomElectionTimeoutInMillis() int {
 	rand.Seed(time.Now().UnixNano())
 	timeout := rand.Intn(MaxWaitInMillis-MinWaitInMillis+1) + MinWaitInMillis
 	return timeout
+}
+
+func hasAttainedMajority(votes, N int) bool {
+	if votes >= getMajority(N) {
+		return true
+	}
+	return false
 }
 
 // for leader: send heartbeats goroutine
@@ -360,7 +395,12 @@ func (r *Raft) replicateCommandToFollowers() (int, bool) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for totalReplications < majority && totalResponses != len(r.peers) - 1 {
+	/*
+		this is similar to the pattern used in sending RequestVote RPCs
+		In this case, we wait till we either replicate command to majority or receive responses from all nodes.
+		In this way, we don't get blocked waiting on a single node failure.
+	*/
+	for !hasAttainedMajority(totalReplications, len(r.peers)) && totalResponses != len(r.peers) - 1 {
 		cond.Wait()
 	}
 
@@ -398,6 +438,7 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		return errors.New("not alive! ")
 	}
 
+	// following the 5 points from the Receiver implementation section of the Raft paper
 	// 1. Reply false if term < currentTerm
 	if args.Term < r.currentTerm {
 		reply.Success = false
@@ -431,9 +472,11 @@ func (r *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) 
 		r.log = append(r.log, args.Entries...)
 		reply.Success = true
 
+		// 5. If leaderCommit > commitIndex, set commitIndex =
+		//min(leaderCommit, index of last new entry)
 		if reply.Success {
 			if args.LeaderCommit > r.commitIndex {
-				r.commitIndex = args.LeaderCommit
+				r.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(len(r.log))))
 			}
 		}
 
@@ -515,6 +558,9 @@ func Make(id int, peers []Peer) *Raft {
 	rf.commitIndex = -1
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+
+	// need to start goroutines here
+	// goroutines normally die when their enclosing method ends but since this object is being added to RPC, they still keep running
 	go rf.electionTimeout()
 	go rf.sendHeartbeatsAsLeader()
 

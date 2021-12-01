@@ -60,13 +60,16 @@ func main() {
 		}(i, peer)
 	}
 
-	testReelection(&cfg)
+	//testReelection(&cfg)
 
 	//testLogAfterFailure(&cfg)
 
 	wg.Wait()
 }
 
+// case: start nodes, wait till election, after 3 secs, disable the leader, new leader gets elected
+// have the client add logs. after waiting some time, enable previously disabled node.
+// ensure node follows the new leader and is up-to-date with the logs added in its absence.
 func testLogAfterFailure(cfg *config) {
 	var currentLeader *raft.Raft
 	for currentLeader == nil {
@@ -89,6 +92,7 @@ func testLogAfterFailure(cfg *config) {
 	currentLeader.IsAlive = true
 }
 
+// case: start nodes, wait till election, after 3 secs, disable the leader, new leader should get elected
 func testReelection(cfg *config) {
 	var currentLeader *raft.Raft
 	for currentLeader == nil {
