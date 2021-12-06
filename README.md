@@ -1,9 +1,30 @@
 # raft
 
-### to print only important logs
+1. ### Install go
 
-`go run server.go -logtostderr=true -v=1`
+    https://go.dev/doc/install
 
-### to print detailed logs
+2. ### Terminal window 1 => Server
 
-`go run server.go -logtostderr=true -v=2`
+    By default, the code uses 3 nodes. Change N in both server and client files to experiment on using more nodes. 
+    
+    `git clone https://github.com/adikul30/raft`
+    
+    `cd raft/server/main`
+
+    #### to print only important logs
+    
+    `go run server.go -logtostderr=true -v=1`
+
+    #### to print detailed logs instead
+    
+    `go run server.go -logtostderr=true -v=2`
+
+    After a leader has been elected, to add new logs to raft, run the client. 
+
+3. ### Terminal window 2 => Client
+
+    `cd raft/client/main`
+
+    `go run client.go`
+
