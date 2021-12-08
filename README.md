@@ -1,4 +1,6 @@
-# raft
+# Project for RIT CSCI-652 Dsitributed Systems course
+
+## raft
 
 1. ### Install go
 
