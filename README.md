@@ -30,3 +30,14 @@
 
     `go run client.go`
 
+
+### Reference
+```
+@inproceedings{ongaro2014search,
+  title={In search of an understandable consensus algorithm},
+  author={Ongaro, Diego and Ousterhout, John},
+  booktitle={2014 $\{$USENIX$\}$ Annual Technical Conference ($\{$USENIX$\}$$\{$ATC$\}$ 14)},
+  pages={305--319},
+  year={2014}
+}
+```
