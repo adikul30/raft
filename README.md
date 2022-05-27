@@ -31,13 +31,16 @@
     `go run client.go`
 
 
-### Reference
+### References
+
+1. 
+```@inproceedings{ongaro2014search,
+      title={In search of an understandable consensus algorithm},
+      author={Ongaro, Diego and Ousterhout, John},
+      booktitle={2014 $\{$USENIX$\}$ Annual Technical Conference ($\{$USENIX$\}$$\{$ATC$\}$ 14)},
+      pages={305--319},
+      year={2014}
+    }
 ```
-@inproceedings{ongaro2014search,
-  title={In search of an understandable consensus algorithm},
-  author={Ongaro, Diego and Ousterhout, John},
-  booktitle={2014 $\{$USENIX$\}$ Annual Technical Conference ($\{$USENIX$\}$$\{$ATC$\}$ 14)},
-  pages={305--319},
-  year={2014}
-}
-```
+2. Excellent MIT OCW (https://pdos.csail.mit.edu/6.824/schedule.html) lectures and labs. 
+3. This awesome vizualization (http://thesecretlivesofdata.com/raft/)
