@@ -1,4 +1,4 @@
-# Project for RIT CSCI-652 Dsitributed Systems course
+# Project for RIT CSCI-652 Distributed Systems course
 
 ## raft
 
